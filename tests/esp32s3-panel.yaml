@@ -1,0 +1,91 @@
+# Compile test for a 480x480 ESP32-S3 panel (ST7701S, octal PSRAM), close to a real wall panel.
+# The camera page starts the stream when it opens and stops it when it closes.
+esphome:
+  name: panel-camera-test
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+
+wifi:
+  ssid: test-network
+  password: test-password
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+spi:
+  - id: lcd_spi
+    clk_pin: GPIO48
+    mosi_pin: GPIO47
+
+display:
+  - platform: st7701s
+    id: panel_display
+    update_interval: never
+    auto_clear_enabled: false
+    data_rate: 2MHz
+    spi_mode: MODE3
+    color_order: RGB
+    dimensions:
+      width: 480
+      height: 480
+    cs_pin: 39
+    de_pin: 18
+    hsync_pin: 16
+    vsync_pin: 17
+    pclk_pin: 21
+    pclk_frequency: 12MHz
+    data_pins:
+      red: [11, 12, 13, 14, 0]
+      green: [8, 20, 3, 46, 9, 10]
+      blue: [4, 5, 6, 7, 15]
+
+online_video:
+  - id: door_camera
+    # go2rtc can scale on the fly, so the panel only ever decodes 480x480 frames:
+    # streams: { door_480: "ffmpeg:door#video=mjpeg#width=480#height=480" }
+    url: http://go2rtc.local:1984/api/stream.mjpeg?src=door_480
+    resize: 480x480
+    max_fps: 5
+    on_frame:
+      - lvgl.image.update:
+          id: camera_view
+          src: door_camera
+    on_error:
+      - logger.log: "Camera stream problem, retrying"
+
+lvgl:
+  pages:
+    - id: home_page
+      widgets:
+        - button:
+            align: CENTER
+            on_click:
+              - lvgl.page.show: camera_page
+            widgets:
+              - label:
+                  text: "Front door"
+    - id: camera_page
+      on_load:
+        - online_video.start: door_camera
+      on_unload:
+        - online_video.stop: door_camera
+      widgets:
+        - image:
+            id: camera_view
+            src: door_camera
+            align: CENTER
+            on_click:
+              - lvgl.page.show: home_page

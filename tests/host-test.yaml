@@ -1,0 +1,48 @@
+# End-to-end test on a computer: run tests/mjpeg_server.py, then build and run this with the
+# ESPHome host platform. Each frame is drawn by LVGL and its centre pixel is logged, so
+# tests/run_host_test.py can check that the colours arrive in the order the server sends them.
+esphome:
+  name: online-video-test
+
+host:
+
+logger:
+  level: DEBUG
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+display:
+  - platform: sdl
+    id: sdl_display
+    dimensions:
+      width: 320
+      height: 240
+    auto_clear_enabled: false
+    update_interval: never
+
+lvgl:
+  widgets:
+    - image:
+        id: camera_view
+        src: test_stream
+        align: CENTER
+
+online_video:
+  - id: test_stream
+    url: http://127.0.0.1:8099/stream.mjpeg
+    resize: 320x240
+    max_fps: 10
+    autostart: true
+    on_frame:
+      - lvgl.image.update:
+          id: camera_view
+          src: test_stream
+      - lambda: |-
+          auto c = id(test_stream).get_pixel(160, 120);
+          auto k = id(test_stream).get_pixel(2, 2);
+          ESP_LOGI("check", "frame rgb=%u,%u,%u corner=%u,%u,%u", c.r, c.g, c.b, k.r, k.g, k.b);
+    on_error:
+      - logger.log: "stream error"
