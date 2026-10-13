@@ -22,6 +22,15 @@ hands each frame to LVGL as a normal image.
 - **Plain HTTP only**, no TLS stack pulled in. If a frame is bigger than the screen, the decoder
   shrinks it by 2, 4 or 8 for free (a smaller frame is centred with black borders).
 
+## What it costs
+
+Measured on an ESP32-S3 480x480 LVGL panel build, compared with the same build without it:
+
+- **Flash:** +48 kB (the JPEG decoder and this component)
+- **Static RAM:** +3.5 kB
+- **Allocated once at boot:** two 460 kB frames and the 100 kB JPEG buffer in PSRAM (about 1 MB
+  for 480x480), plus about 18 kB for the decoder and a 5 kB task stack in internal RAM.
+
 ## Example
 
 ```yaml
