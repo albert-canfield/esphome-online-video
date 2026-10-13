@@ -23,6 +23,11 @@ namespace esphome::online_video {
 
 static constexpr uint8_t MAX_HEADERS = 4;
 
+enum Fit : uint8_t {
+  FIT_COVER,    ///< fill the image, cropping the edges that do not fit
+  FIT_CONTAIN,  ///< show the whole frame, with black borders where it does not fill the image
+};
+
 /// An image whose pixels come from an MJPEG stream.
 ///
 /// A background task reads the stream and decodes frames into the back buffer. The main loop only
@@ -39,6 +44,13 @@ class OnlineVideo : public Component, public image::Image {
 
   void add_header(const char *name, const char *value);
   void set_autostart(bool autostart) { this->autostart_ = autostart; }
+  void set_fit(Fit fit) { this->fit_ = fit; }
+  /// Stream a Home Assistant camera entity. Home Assistant shares the camera's short-lived access
+  /// token over the native API, so no token has to be stored on the device.
+  void set_home_assistant_camera(const char *entity_id, const char *interval) {
+    this->camera_ = entity_id;
+    this->interval_ = interval;
+  }
 
   /// Start reading the stream. Safe to call when already running.
   void start();
@@ -52,7 +64,9 @@ class OnlineVideo : public Component, public image::Image {
  protected:
   static void task_entry_(void *arg);
   void task_loop_();
-  void stream_once_();
+  /// One connection attempt. Returns false when it did not try because the token is not known yet.
+  bool stream_once_();
+  bool build_path_(char *out, size_t size);
   void report_error_(const char *what);
   void log_stats_(uint32_t now);
 
@@ -71,6 +85,14 @@ class OnlineVideo : public Component, public image::Image {
   uint32_t buffer_size_;
   uint32_t frame_interval_ms_;
   bool autostart_{false};
+  Fit fit_{FIT_COVER};
+  const char *camera_{nullptr};
+  const char *interval_{nullptr};
+
+  // The Home Assistant access token: written by the main loop, read by the task when it connects.
+  Mutex token_lock_;
+  char token_[128]{};
+  bool token_wait_logged_{false};
 
   // Two RGB565 frames: data_start_ (from image::Image) always points at the front one.
   uint8_t *frames_[2]{};

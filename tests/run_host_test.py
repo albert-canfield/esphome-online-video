@@ -26,6 +26,7 @@ MODES = {
     "640x480, decoded at 1/2": (["--size", "640x480"], False),
     "1280x960, decoded at 1/4": (["--size", "1280x960"], False),
     "160x120, centred with borders": (["--size", "160x120"], True),
+    "400x240, edges cropped to fill (cover)": (["--size", "400x240"], False),
 }
 FRAME_RE = re.compile(r"frame rgb=(\d+),(\d+),(\d+) corner=(\d+),(\d+),(\d+)")
 ORDER = "RGB"

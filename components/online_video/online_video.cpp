@@ -3,8 +3,13 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
+#ifdef USE_API_HOMEASSISTANT_STATES
+#include "esphome/components/api/api_server.h"
+#endif
+
 #include <JPEGDEC.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cinttypes>
 #include <cstdio>
@@ -28,6 +33,7 @@ static constexpr uint32_t SOCKET_TIMEOUT_MS = 1000;   // how quickly a blocked r
 static constexpr uint32_t NO_DATA_TIMEOUT_MS = 10000;  // give up on a silent connection
 static constexpr uint32_t RECONNECT_DELAY_MS = 3000;
 static constexpr uint32_t STATS_INTERVAL_MS = 30000;
+static constexpr uint32_t TOKEN_POLL_MS = 200;
 
 static void sleep_ms(uint32_t ms) {
 #ifdef USE_ESP32
@@ -104,6 +110,17 @@ void OnlineVideo::setup() {
   this->thread_.detach();
 #endif
 
+#ifdef USE_API_HOMEASSISTANT_STATES
+  if (this->camera_ != nullptr) {
+    api::global_api_server->subscribe_home_assistant_state(this->camera_, "access_token", [this](StringRef token) {
+      LockGuard lock(this->token_lock_);
+      const size_t n = std::min(token.size(), sizeof(this->token_) - 1);
+      memcpy(this->token_, token.c_str(), n);
+      this->token_[n] = '\0';
+    });
+  }
+#endif
+
   // The loop only runs when the task has a new frame or an error to hand over.
   this->disable_loop();
   if (this->autostart_)
@@ -113,13 +130,16 @@ void OnlineVideo::setup() {
 void OnlineVideo::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "Online video:\n"
-                "  URL: %s\n"
+                "  %s: %s\n"
                 "  Size: %dx%d\n"
                 "  Max frame rate: %" PRIu32 " fps\n"
                 "  JPEG buffer: %" PRIu32 " bytes\n"
                 "  Autostart: %s",
-                this->url_, this->width_, this->height_, 1000 / this->frame_interval_ms_, this->buffer_size_,
-                YESNO(this->autostart_));
+                this->camera_ != nullptr ? "Home Assistant" : "URL", this->url_, this->width_, this->height_,
+                1000 / this->frame_interval_ms_, this->buffer_size_, YESNO(this->autostart_));
+  if (this->camera_ != nullptr)
+    ESP_LOGCONFIG(TAG, "  Camera: %s", this->camera_);
+  ESP_LOGCONFIG(TAG, "  Fit: %s", this->fit_ == FIT_COVER ? "cover" : "contain");
   for (uint8_t i = 0; i < this->header_count_; i++)
     ESP_LOGCONFIG(TAG, "  Header: %s", this->header_names_[i]);
 }
@@ -163,7 +183,10 @@ void OnlineVideo::task_loop_() {
 #endif
       continue;
     }
-    this->stream_once_();
+    if (!this->stream_once_()) {
+      sleep_ms(TOKEN_POLL_MS);  // waiting for Home Assistant to share the camera token
+      continue;
+    }
     for (uint32_t waited = 0; waited < RECONNECT_DELAY_MS && this->running_.load(); waited += 100)
       sleep_ms(100);
   }
@@ -175,37 +198,59 @@ void OnlineVideo::report_error_(const char *what) {
   this->enable_loop_soon_any_context();
 }
 
-void OnlineVideo::stream_once_() {
+bool OnlineVideo::build_path_(char *out, size_t size) {
+  if (this->camera_ == nullptr) {
+    snprintf(out, size, "%s", this->url_parts_.path);
+    return true;
+  }
+  LockGuard lock(this->token_lock_);
+  if (this->token_[0] == '\0') {
+    if (!this->token_wait_logged_) {
+      ESP_LOGI(TAG, "Waiting for Home Assistant to share the access token of %s", this->camera_);
+      this->token_wait_logged_ = true;
+    }
+    return false;
+  }
+  this->token_wait_logged_ = false;
+  snprintf(out, size, "/api/camera_proxy_stream/%s?interval=%s&token=%s", this->camera_, this->interval_,
+           this->token_);
+  return true;
+}
+
+bool OnlineVideo::stream_once_() {
+  char path[256];
+  if (!this->build_path_(path, sizeof(path)))
+    return false;
   struct addrinfo hints {};
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
   char port[6];
   snprintf(port, sizeof(port), "%u", this->url_parts_.port);
   struct addrinfo *address = nullptr;
-  if (getaddrinfo(this->url_parts_.host, port, &hints, &address) != 0 || address == nullptr) {
+  if (::getaddrinfo(this->url_parts_.host, port, &hints, &address) != 0 || address == nullptr) {
     this->report_error_("Could not resolve the stream host");
-    return;
+    return true;
   }
-  const int fd = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+  const int fd = ::socket(address->ai_family, address->ai_socktype, address->ai_protocol);
   if (fd < 0) {
-    freeaddrinfo(address);
+    ::freeaddrinfo(address);
     this->report_error_("Could not open a socket");
-    return;
+    return true;
   }
   struct timeval timeout {};
   timeout.tv_sec = SOCKET_TIMEOUT_MS / 1000;
-  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 #ifdef SO_NOSIGPIPE
   const int one = 1;
-  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+  ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
 #endif
-  const bool connected = connect(fd, address->ai_addr, address->ai_addrlen) == 0;
-  freeaddrinfo(address);
+  const bool connected = ::connect(fd, address->ai_addr, address->ai_addrlen) == 0;
+  ::freeaddrinfo(address);
   if (!connected) {
-    close(fd);
+    ::close(fd);
     this->report_error_("Could not connect to the stream");
-    return;
+    return true;
   }
 
   // HTTP/1.0 keeps servers from adding chunked encoding; it is handled anyway in case one does.
@@ -213,7 +258,7 @@ void OnlineVideo::stream_once_() {
   int length = snprintf(request, sizeof(request),
                         "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: ESPHome online_video\r\n"
                         "Accept: multipart/x-mixed-replace\r\n",
-                        this->url_parts_.path, this->url_parts_.host);
+                        path, this->url_parts_.host);
   for (uint8_t i = 0; i < this->header_count_ && length > 0 && length < static_cast<int>(sizeof(request)); i++) {
     length += snprintf(request + length, sizeof(request) - length, "%s: %s\r\n", this->header_names_[i],
                        this->header_values_[i]);
@@ -221,20 +266,20 @@ void OnlineVideo::stream_once_() {
   if (length > 0 && length < static_cast<int>(sizeof(request)))
     length += snprintf(request + length, sizeof(request) - length, "\r\n");
   if (length <= 0 || length >= static_cast<int>(sizeof(request))) {
-    close(fd);
+    ::close(fd);
     this->report_error_("The request headers are too long");
-    return;
+    return true;
   }
   for (int sent = 0; sent < length;) {
 #ifdef MSG_NOSIGNAL
-    const ssize_t n = send(fd, request + sent, length - sent, MSG_NOSIGNAL);
+    const ssize_t n = ::send(fd, request + sent, length - sent, MSG_NOSIGNAL);
 #else
-    const ssize_t n = send(fd, request + sent, length - sent, 0);
+    const ssize_t n = ::send(fd, request + sent, length - sent, 0);
 #endif
     if (n <= 0) {
-      close(fd);
+      ::close(fd);
       this->report_error_("Could not send the request");
-      return;
+      return true;
     }
     sent += n;
   }
@@ -244,7 +289,7 @@ void OnlineVideo::stream_once_() {
   this->chunked_.reset();
   this->last_data_ms_ = millis();
   while (this->running_.load()) {
-    const ssize_t n = recv(fd, this->rx_, sizeof(this->rx_), 0);
+    const ssize_t n = ::recv(fd, this->rx_, sizeof(this->rx_), 0);
     const uint32_t now = millis();
     if (n > 0) {
       this->last_data_ms_ = now;
@@ -258,7 +303,8 @@ void OnlineVideo::stream_once_() {
         if (!response.done())
           continue;
         if (response.status() != 200) {
-          ESP_LOGW(TAG, "The server answered with status %d", response.status());
+          ESP_LOGW(TAG, "The server answered with status %d%s", response.status(),
+                   response.status() == 401 && this->camera_ != nullptr ? " (the camera token was not accepted yet)" : "");
           this->report_error_("The stream URL did not work");
           break;
         }
@@ -290,7 +336,8 @@ void OnlineVideo::stream_once_() {
     }
     this->log_stats_(now);
   }
-  close(fd);
+  ::close(fd);
+  return true;
 }
 
 bool OnlineVideo::chunk_sink_(void *ctx, const uint8_t *data, size_t len) {
@@ -352,8 +399,14 @@ bool OnlineVideo::decode_(const uint8_t *data, size_t len) {
   const int source_w = jpeg.getWidth();
   const int source_h = jpeg.getHeight();
   int scale = 1;
-  while (scale < 8 && (source_w / scale > this->width_ || source_h / scale > this->height_))
-    scale *= 2;
+  if (this->fit_ == FIT_COVER) {
+    // The biggest reduction that still covers the whole image; the overflow is cropped.
+    while (scale < 8 && source_w / (scale * 2) >= this->width_ && source_h / (scale * 2) >= this->height_)
+      scale *= 2;
+  } else {
+    while (scale < 8 && (source_w / scale > this->width_ || source_h / scale > this->height_))
+      scale *= 2;
+  }
   this->decoded_w_ = source_w / scale;
   this->decoded_h_ = source_h / scale;
   this->offset_x_ = (this->width_ - this->decoded_w_) / 2;

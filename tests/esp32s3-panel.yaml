@@ -16,6 +16,8 @@ psram:
 
 logger:
 
+api:
+
 wifi:
   ssid: test-network
   password: test-password
@@ -54,11 +56,11 @@ display:
 
 online_video:
   - id: door_camera
-    # go2rtc can scale on the fly, so the panel only ever decodes 480x480 frames:
-    # streams: { door_480: "ffmpeg:door#video=mjpeg#width=480#height=480" }
-    url: http://go2rtc.local:1984/api/stream.mjpeg?src=door_480
+    # Home Assistant streams the Reolink "Fluent" (sub-stream) camera entity; the panel gets the
+    # camera's access token over the native API, so no token is stored here.
+    home_assistant: http://192.168.1.10:8123
+    camera: camera.front_door_fluent
     resize: 480x480
-    max_fps: 5
     on_frame:
       - lvgl.image.update:
           id: camera_view

@@ -23,7 +23,10 @@ DOMAIN = "online_video"
 MULTI_CONF = True
 
 CONF_AUTOSTART = "autostart"
+CONF_CAMERA = "camera"
+CONF_FIT = "fit"
 CONF_HEADERS = "headers"
+CONF_HOME_ASSISTANT = "home_assistant"
 CONF_MAX_FPS = "max_fps"
 CONF_ON_FRAME = "on_frame"
 
@@ -31,6 +34,8 @@ MAX_HEADERS = 4
 
 online_video_ns = cg.esphome_ns.namespace("online_video")
 OnlineVideo = online_video_ns.class_("OnlineVideo", cg.Component, image.Image_)
+Fit = online_video_ns.enum("Fit")
+FITS = {"COVER": Fit.FIT_COVER, "CONTAIN": Fit.FIT_CONTAIN}
 StartAction = online_video_ns.class_(
     "StartAction", automation.Action, cg.Parented.template(OnlineVideo)
 )
@@ -48,19 +53,39 @@ def validate_url(value: str) -> str:
     value = cv.url(value)
     if not value.lower().startswith("http://"):
         raise cv.Invalid(
-            "Only http:// URLs are supported. Serve the stream from your local network, "
-            "for example with go2rtc."
+            "Only http:// URLs are supported (the stream is read on your local network)."
         )
     return value
+
+
+def validate_camera(value: str) -> str:
+    value = cv.entity_id(value)
+    if not value.startswith("camera."):
+        raise cv.Invalid("Use a Home Assistant camera entity, for example camera.front_door_fluent")
+    return value
+
+
+def validate_source(config: ConfigType) -> ConfigType:
+    if CONF_CAMERA in config and CONF_HOME_ASSISTANT not in config:
+        raise cv.Invalid(
+            f"'{CONF_HOME_ASSISTANT}' (the address of Home Assistant, for example "
+            f"http://192.168.1.10:8123) is needed to use '{CONF_CAMERA}'"
+        )
+    if CONF_HOME_ASSISTANT in config and CONF_CAMERA not in config:
+        raise cv.Invalid(f"'{CONF_CAMERA}' is needed with '{CONF_HOME_ASSISTANT}'")
+    return config
 
 
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(OnlineVideo),
-            cv.Required(CONF_URL): validate_url,
+            cv.Optional(CONF_URL): validate_url,
+            cv.Optional(CONF_HOME_ASSISTANT): validate_url,
+            cv.Optional(CONF_CAMERA): cv.All(validate_camera, cv.requires_component("api")),
             cv.Required(CONF_RESIZE): cv.dimensions,
-            cv.Optional(CONF_MAX_FPS, default=5): cv.int_range(min=1, max=30),
+            cv.Optional(CONF_FIT, default="COVER"): cv.enum(FITS, upper=True),
+            cv.Optional(CONF_MAX_FPS, default=2): cv.int_range(min=1, max=30),
             cv.Optional(CONF_BUFFER_SIZE, default="100kB"): cv.All(
                 cv.validate_bytes, cv.int_range(min=8192, max=2_000_000)
             ),
@@ -77,6 +102,8 @@ CONFIG_SCHEMA = cv.All(
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
+    cv.has_exactly_one_key(CONF_URL, CONF_CAMERA),
+    validate_source,
     cv.only_on(["esp32", "host"]),
 )
 
@@ -113,13 +140,19 @@ async def to_code(config: ConfigType) -> None:
 
     var = cg.new_Pvariable(
         config[CONF_ID],
-        config[CONF_URL],
+        config.get(CONF_URL) or config[CONF_HOME_ASSISTANT],
         width,
         height,
         config[CONF_BUFFER_SIZE],
         config[CONF_MAX_FPS],
     )
     await cg.register_component(var, config)
+    cg.add(var.set_fit(config[CONF_FIT]))
+    if camera := config.get(CONF_CAMERA):
+        # Home Assistant composes the stream from snapshots; ask for only as many as we show.
+        interval = max(0.5, round(1 / config[CONF_MAX_FPS], 2))
+        cg.add(var.set_home_assistant_camera(camera, f"{interval:g}"))
+        cg.add_define("USE_API_HOMEASSISTANT_STATES")
     if config[CONF_AUTOSTART]:
         cg.add(var.set_autostart(True))
     for name, value in config.get(CONF_HEADERS, {}).items():

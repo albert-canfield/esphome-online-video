@@ -1,0 +1,49 @@
+# End-to-end test of the Home Assistant mode on a computer. tests/run_ha_test.py plays the part of
+# Home Assistant: it connects over the native API and shares the camera access token, while
+# tests/mjpeg_server.py --ha-tokens serves /api/camera_proxy_stream/camera.test like HA does.
+esphome:
+  name: online-video-ha-test
+
+host:
+
+logger:
+  level: DEBUG
+
+api:
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+display:
+  - platform: sdl
+    id: sdl_display
+    dimensions:
+      width: 320
+      height: 240
+    auto_clear_enabled: false
+    update_interval: never
+
+lvgl:
+  widgets:
+    - image:
+        id: camera_view
+        src: door_camera
+        align: CENTER
+
+online_video:
+  - id: door_camera
+    home_assistant: http://127.0.0.1:8099
+    camera: camera.test
+    resize: 320x240
+    autostart: true
+    on_frame:
+      - lvgl.image.update:
+          id: camera_view
+          src: door_camera
+      - lambda: |-
+          auto c = id(door_camera).get_pixel(160, 120);
+          ESP_LOGI("check", "frame rgb=%u,%u,%u", c.r, c.g, c.b);
+    on_error:
+      - logger.log: "stream error"

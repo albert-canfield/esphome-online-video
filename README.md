@@ -8,19 +8,21 @@ hands each frame to LVGL as a normal image.
 
 ## Why it stays light
 
-- **The server does the heavy work.** Let go2rtc (or similar) send MJPEG already scaled to your
-  screen, so the ESP only decodes small JPEGs. No H.264 on the device.
+- **Home Assistant does the work.** The panel asks Home Assistant for the camera, and Home
+  Assistant turns snapshots into a 2 fps MJPEG stream. With a Reolink camera, use the "Fluent"
+  (sub-stream) entity, so the snapshots are already small. No add-ons, no H.264 on the device.
+- **No token to manage.** Home Assistant shares the camera's short-lived access token with the
+  panel over the native API, like a `homeassistant` sensor. Nothing secret goes in your YAML.
 - **The main loop never waits.** A background task reads and decodes the stream. The main loop only
   swaps two buffers and redraws, so touch and LVGL stay smooth.
 - **No memory churn.** Two frame buffers and the JPEG buffer are allocated once at boot (in PSRAM
   when you have it). Nothing is allocated per frame.
-- **Frames never pile up.** A `max_fps` cap (5 by default); frames that arrive early, or while the
-  last one is still waiting to be shown, are skipped without even being copied.
-- **CPU guard.** Decoding never takes more than about two thirds of the time, so the Wi-Fi core
-  always has room and the watchdog stays happy.
+- **Only what you show.** Home Assistant is asked for no more snapshots than `max_fps` (2 by
+  default). Frames that arrive early, or while the last one is still waiting to be shown, are
+  skipped without even being copied, and decoding never takes more than about two thirds of the CPU.
 - **Off when not visible.** Start and stop actions, so it only runs while the camera page is open.
-- **Plain HTTP only**, no TLS stack pulled in. If a frame is bigger than the screen, the decoder
-  shrinks it by 2, 4 or 8 for free (a smaller frame is centred with black borders).
+- **Fills the screen for free.** The decoder can only shrink by 2, 4 or 8, so a 640x480 sub-stream
+  is decoded at full size and its edges are cropped to fill a 480x480 screen (`fit: cover`).
 
 ## What it costs
 
@@ -31,18 +33,20 @@ Measured on an ESP32-S3 480x480 LVGL panel build, compared with the same build w
 - **Allocated once at boot:** two 460 kB frames and the 100 kB JPEG buffer in PSRAM (about 1 MB
   for 480x480), plus about 18 kB for the decoder and a 5 kB task stack in internal RAM.
 
-## Example
+## Example (Home Assistant)
 
 ```yaml
+api:
+
 external_components:
   - source: github://albert-canfield/esphome-online-video
     components: [online_video]
 
 online_video:
   - id: door_camera
-    url: http://go2rtc.local:1984/api/stream.mjpeg?src=door_480
+    home_assistant: http://192.168.1.10:8123   # your Home Assistant address
+    camera: camera.front_door_fluent           # the Reolink sub-stream entity
     resize: 480x480
-    max_fps: 5
     on_frame:
       - lvgl.image.update:
           id: camera_view
@@ -62,39 +66,40 @@ lvgl:
             align: CENTER
 ```
 
-A full panel example is in [tests/esp32s3-panel.yaml](tests/esp32s3-panel.yaml).
+There is nothing to set up in Home Assistant: the device just needs to be added through the
+ESPHome integration as usual. Use the IP address of Home Assistant; `.local` names may not
+resolve on the device. A full panel example is in [tests/esp32s3-panel.yaml](tests/esp32s3-panel.yaml).
 
-### go2rtc
+### Smoother video with go2rtc (optional)
 
-A stream that go2rtc scales to the panel size:
+Home Assistant streams from snapshots, so it stops at 2 fps. For 5 to 10 fps, any MJPEG URL
+works too, for example a go2rtc stream scaled to the panel:
 
 ```yaml
+# go2rtc.yaml
 streams:
-  door: rtsp://user:pass@192.168.1.20/stream1
-  door_480: ffmpeg:door#video=mjpeg#width=480#height=480
-```
+  door_480: ffmpeg:rtsp://user:pass@192.168.1.20/stream1#video=mjpeg#width=480#height=480
 
-Then use `http://<go2rtc-host>:1984/api/stream.mjpeg?src=door_480`.
-
-### Home Assistant camera proxy
-
-`http://<ha-host>:8123/api/camera_proxy_stream/camera.front_door` also works. It needs a
-long-lived access token, and sends the camera at full size (the decoder will shrink it, but
-go2rtc is lighter on the ESP):
-
-```yaml
-    headers:
-      Authorization: !secret ha_bearer_token   # "Bearer eyJ..."
+# ESPHome
+online_video:
+  - id: door_camera
+    url: http://192.168.1.11:1984/api/stream.mjpeg?src=door_480
+    resize: 480x480
+    max_fps: 8
 ```
 
 ## Options
 
-- **url** (required): `http://` URL of an MJPEG (`multipart/x-mixed-replace`) stream.
+- **home_assistant** and **camera**: the Home Assistant address and a `camera.` entity. Needs
+  `api:`. Or instead:
+- **url**: an `http://` URL of any MJPEG (`multipart/x-mixed-replace`) stream.
 - **resize** (required): size of the image, normally your screen or widget size, e.g. `480x480`.
-- **max_fps** (default `5`, 1 to 30): the most frames per second to show.
+- **fit** (default `cover`): `cover` fills the image and crops what does not fit, `contain` shows
+  the whole frame with black borders.
+- **max_fps** (default `2`, 1 to 30): the most frames per second to show.
 - **buffer_size** (default `100kB`): the largest JPEG frame accepted. Bigger frames are skipped.
 - **autostart** (default `false`): start streaming at boot instead of waiting for `online_video.start`.
-- **headers**: up to 4 extra request headers, for example `Authorization`.
+- **headers**: up to 4 extra request headers for `url` streams, for example `Authorization`.
 - **on_frame**: runs on the main loop after each new frame. Use it to update the LVGL image.
 - **on_error**: runs when the stream can't be reached or stops. It retries every 3 s by itself.
 
@@ -114,4 +119,7 @@ Actions: `online_video.start`, `online_video.stop`. Condition: `online_video.is_
   `tests/mjpeg_server.py` streams red, green and blue frames, and the test checks every frame
   arrives with the right colour and in order, with Content-Length, chunked (like go2rtc) and
   without Content-Length, and frames 2x and 4x too big or smaller than the image.
-- `tests/esp32s3-panel.yaml`: compile test for an ESP32-S3 panel.
+- `tests/run_ha_test.py`: end to end in Home Assistant mode. It plays the part of Home Assistant
+  over the native API, and checks the device waits for the camera token, streams with it,
+  reconnects with a new token after it rotates, and never logs it.
+- `tests/esp32s3-panel.yaml`: compile test for an ESP32-S3 panel in Home Assistant mode.

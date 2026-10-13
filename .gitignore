@@ -1,3 +1,4 @@
 .esphome/
 __pycache__/
 *.pyc
+tests/.ha-test/

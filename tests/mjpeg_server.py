@@ -3,7 +3,9 @@
     python tests/mjpeg_server.py --port 8099 --size 320x240 --fps 10 [--chunked] [--no-length]
 
 --chunked answers with HTTP/1.1 chunked encoding (as Go servers such as go2rtc do),
---no-length leaves Content-Length out of each part so the client has to find the end itself.
+--no-length leaves Content-Length out of each part so the client has to find the end itself,
+--ha-tokens a,b acts like Home Assistant's /api/camera_proxy_stream/<camera> and only
+accepts those camera access tokens.
 Needs Pillow (it is in the ESPHome dev environment).
 """
 
@@ -13,6 +15,7 @@ import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import time
+from urllib.parse import parse_qs, urlsplit
 
 from PIL import Image
 
@@ -28,7 +31,9 @@ def make_frames(width: int, height: int) -> list[bytes]:
     return frames
 
 
-def make_handler(frames: list[bytes], fps: float, chunked: bool, with_length: bool):
+def make_handler(
+    frames: list[bytes], fps: float, chunked: bool, with_length: bool, ha_tokens: set[str] | None
+):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1" if chunked else "HTTP/1.0"
 
@@ -42,7 +47,20 @@ def make_handler(frames: list[bytes], fps: float, chunked: bool, with_length: bo
                 self.wfile.write(data)
 
         def do_GET(self) -> None:  # noqa: N802 (http.server naming)
-            if not self.path.startswith("/stream.mjpeg"):
+            url = urlsplit(self.path)
+            if ha_tokens is not None:
+                query = parse_qs(url.query)
+                token = query.get("token", [""])[0]
+                print(f"[server] HA request for {url.path} interval={query.get('interval')}", flush=True)
+                if not url.path.startswith("/api/camera_proxy_stream/camera."):
+                    self.send_error(404)
+                    return
+                if token not in ha_tokens:
+                    print("[server] token rejected", flush=True)
+                    self.send_error(401)
+                    return
+                print("[server] token accepted", flush=True)
+            elif not url.path.startswith("/stream.mjpeg"):
                 self.send_error(404)
                 return
             self.send_response(200)
@@ -76,12 +94,14 @@ def main() -> None:
     parser.add_argument("--fps", type=float, default=10)
     parser.add_argument("--chunked", action="store_true")
     parser.add_argument("--no-length", action="store_true")
+    parser.add_argument("--ha-tokens", help="comma separated camera access tokens to accept")
     args = parser.parse_args()
     width, height = (int(v) for v in args.size.lower().split("x"))
     frames = make_frames(width, height)
-    handler = make_handler(frames, args.fps, args.chunked, not args.no_length)
+    tokens = set(args.ha_tokens.split(",")) if args.ha_tokens else None
+    handler = make_handler(frames, args.fps, args.chunked, not args.no_length, tokens)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
-    print(f"[server] http://127.0.0.1:{args.port}/stream.mjpeg ({width}x{height}, {args.fps} fps)", flush=True)
+    print(f"[server] port {args.port} ({width}x{height}, {args.fps} fps)", flush=True)
     server.serve_forever()
 
 
